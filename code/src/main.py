@@ -1,19 +1,22 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 import torch
 import torch.nn as nn
 import argparse
 import yaml
-import os
 import time
 import json
-from utils.utils import get_time_str,check_dir,draw_loss_line,draw_mape_node,get_randmask,get_block_mask, cal_shortest_path_length
-from logger import getlogger
-from model.model import AICLLM
-from model.llm import GPT2, LLaMA7B, Transformer
-from data.data import load_data
-from utils.metrics import MAE_torch,RMSE_torch,MAPE_torch,MAPE_torch_node,cal_metrics
-from utils.argsinit import InitArgs
-from utils.csv_logger import log_result_to_csv
+from src.utils.utils import get_time_str,check_dir,draw_loss_line,draw_mape_node,get_randmask,get_block_mask, cal_shortest_path_length
+from src.logger import getlogger
+from src.model.model import AICLLM
+from src.model.llm import GPT2, LLaMA7B, Transformer
+from src.data.data import load_data
+from src.utils.metrics import MAE_torch,RMSE_torch,MAPE_torch,MAPE_torch_node,cal_metrics
+from src.utils.argsinit import InitArgs
+from src.utils.csv_logger import log_result_to_csv
 import copy
 from torch.optim.lr_scheduler import ExponentialLR
 import nni
@@ -21,7 +24,7 @@ import random
 import string
 import wandb
 from datetime import datetime
-from prompts import PROMPTS
+from src.prompts import PROMPTS
 wandb.login(key = 'c18f56f87b92b4296251b454a8556397e6153841')
 
 

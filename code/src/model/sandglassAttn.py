@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from model.position import PositionalEncoding
+from src.model.position import PositionalEncoding
 
 class SAG(nn.Module):
     def __init__(self, sag_dim, sag_tokens, emb_dim, sample_len, features, dropout):

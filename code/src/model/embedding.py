@@ -1,7 +1,7 @@
 import torch 
 from torch import nn
 import numpy as np
-from utils.utils import lap_eig, topological_sort
+from src.utils.utils import lap_eig, topological_sort
 
 class TimeEmbedding(nn.Module):
     def __init__(self, t_dim, steps_per_day=288):

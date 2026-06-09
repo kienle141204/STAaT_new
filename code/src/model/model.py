@@ -1,11 +1,11 @@
 import torch 
 from torch import nn
 import numpy as np
-from utils.utils import lap_eig, topological_sort
+from src.utils.utils import lap_eig, topological_sort
 from typing import Optional
-from model.sandglassAttn import SAG, SetTransformerSAG
-from model.embedding import TimeEmbedding, NodeEmbedding
-from model.tokenizer import Node2Token, Time2TokenPerNode
+from src.model.sandglassAttn import SAG, SetTransformerSAG
+from src.model.embedding import TimeEmbedding, NodeEmbedding
+from src.model.tokenizer import Node2Token, Time2TokenPerNode
 
 class DecodingLayer(nn.Module):
     def __init__(self, input_dim, emb_dim, output_dim):

@@ -1,10 +1,10 @@
 import torch
 import numpy as np
 import torch.utils.data
-from utils.utils import get_adjacency_matrix_2direction, get_adjacency_matrix
+from src.utils.utils import get_adjacency_matrix_2direction, get_adjacency_matrix
 from typing import Any, Dict, Optional, Tuple, Union
 import pandas as pd
-from data.scaler import StandardScaler, MinMaxScaler
+from src.data.scaler import StandardScaler, MinMaxScaler
 import os
 
 def generate_sample_by_sliding_window(data, sample_len, step=1):

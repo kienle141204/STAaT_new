@@ -2,8 +2,8 @@ import torch
 import numpy as np
 import torch.utils.data
 from typing import Dict
-from data.data_provider import PEMSFLOWProvider, ENERGYProvider, BasicDataset
-from data.scaler import StandardScaler
+from src.data.data_provider import PEMSFLOWProvider, ENERGYProvider, BasicDataset
+from src.data.scaler import StandardScaler
 import os
 
 data_dict = {
