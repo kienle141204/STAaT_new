@@ -40,7 +40,7 @@ class AICLLM(nn.Module):
                  anchor_day_loss_weight: float = 0.05,
                  anchor_loss_type: str = 'huber',
                  t_dim: int = 64, trunc_k=16, wo_conloss=False, wo_conloss1=False, wo_conloss2=False,
-                 ablation_drop_token: int = -1) :
+                 ablation_drop_token: int = -1, steps_per_day: int = 288) :
         super(AICLLM, self).__init__()
 
         self.basemodel = basemodel
@@ -85,25 +85,27 @@ class AICLLM(nn.Module):
             self.node_tokenizer = Node2Token(
                 sample_len=6,  # 6 time tokens from Time2TokenPerNode
                 features=self.emb_dim,  # each token has emb_dim features
-                node_emb_dim=node_emb_dim, 
-                emb_dim=self.emb_dim, 
-                tim_dim=tim_dim, 
+                node_emb_dim=node_emb_dim,
+                emb_dim=self.emb_dim,
+                tim_dim=tim_dim,
                 dropout=dropout,
-                use_node_embedding=use_node_embedding
+                use_node_embedding=use_node_embedding,
+                use_token_pooling=True  # weighted-sum over 6 tokens (~769 params vs 3.5M)
             )
         else:
             self.node_tokenizer = Node2Token(
                 sample_len=sample_len,  # raw time steps
                 features=input_dim,     # raw input features
-                node_emb_dim=node_emb_dim, 
-                emb_dim=self.emb_dim, 
-                tim_dim=tim_dim, 
+                node_emb_dim=node_emb_dim,
+                emb_dim=self.emb_dim,
+                tim_dim=tim_dim,
                 dropout=dropout,
-                use_node_embedding=use_node_embedding
+                use_node_embedding=use_node_embedding,
+                use_token_pooling=False
             )
 
         self.node_embedding = NodeEmbedding(adj_mx=adj_mx, node_emb_dim=node_emb_dim, k=trunc_k, dropout=dropout)
-        self.time_embedding = TimeEmbedding(t_dim=t_dim)
+        self.time_embedding = TimeEmbedding(t_dim=t_dim, steps_per_day=steps_per_day)
         
         # Sandglass Attn
         if self.use_sandglassAttn == 1:

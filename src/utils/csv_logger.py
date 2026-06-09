@@ -3,7 +3,8 @@ import os
 from datetime import datetime
 
 
-def log_result_to_csv(args, mae, rmse, mape, total_params, total_trainable_params, csv_path=None):
+def log_result_to_csv(args, mae, rmse, mape, total_params, total_trainable_params,
+                      macs=None, avg_train_time=None, avg_test_time=None, csv_path=None):
     if csv_path is None:
         csv_path = os.path.join(args.log_root, 'experiment_results.csv')
 
@@ -59,9 +60,14 @@ def log_result_to_csv(args, mae, rmse, mape, total_params, total_trainable_param
         'anchor_week_loss_weight',
         'anchor_loss_type',
 
-        # Model size
+        # Model size & compute
         'total_params',
         'total_trainable_params',
+        'macs',
+
+        # Timing
+        'avg_train_time_s',
+        'avg_test_time_s',
 
         # Results (3 losses)
         'MAE',
@@ -116,8 +122,12 @@ def log_result_to_csv(args, mae, rmse, mape, total_params, total_trainable_param
 
         'total_params': total_params,
         'total_trainable_params': total_trainable_params,
+        'macs': macs if macs is not None and macs >= 0 else '',
 
-        'MAE': f'{mae:.4f}' if mae is not None else '',
+        'avg_train_time_s': f'{avg_train_time:.2f}' if avg_train_time is not None else '',
+        'avg_test_time_s':  f'{avg_test_time:.2f}'  if avg_test_time  is not None else '',
+
+        'MAE':  f'{mae:.4f}'  if mae  is not None else '',
         'RMSE': f'{rmse:.4f}' if rmse is not None else '',
         'MAPE': f'{mape:.4f}' if mape is not None else '',
     }

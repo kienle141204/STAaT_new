@@ -4,11 +4,12 @@ import numpy as np
 from utils.utils import lap_eig, topological_sort
 
 class TimeEmbedding(nn.Module):
-    def __init__(self, t_dim):
+    def __init__(self, t_dim, steps_per_day=288):
         super(TimeEmbedding, self).__init__()
-        self.day_embedding = nn.Embedding(num_embeddings=288, embedding_dim=t_dim)
+        self.steps_per_day = steps_per_day
+        self.day_embedding = nn.Embedding(num_embeddings=steps_per_day, embedding_dim=t_dim)
         self.week_embedding = nn.Embedding(num_embeddings=7, embedding_dim=t_dim)
-    
+
     def forward(self, TE):
         B, T, _ = TE.shape
 
@@ -16,11 +17,12 @@ class TimeEmbedding(nn.Module):
         hour = (TE[..., 3].to(torch.long) % 24).view(B * T, -1)
         minute = (TE[..., 4].to(torch.long) % 60).view(B * T, -1)
 
+        day_slot = ((hour * 60 + minute) * self.steps_per_day // (24 * 60)).clamp(0, self.steps_per_day - 1)
         WE = self.week_embedding(week).view(B, T, -1)
-        DE = self.day_embedding((hour*60 + minute)//5).view(B, T, -1)
+        DE = self.day_embedding(day_slot).view(B, T, -1)
 
         TE = torch.cat([WE, DE], dim=-1).view(B, T, -1)
-        return TE, DE 
+        return TE, DE
     
 
 class NodeEmbedding(nn.Module):
@@ -44,10 +46,10 @@ class NodeEmbedding(nn.Module):
 
         k = self.k
         if k > N:
-            eig_vec = np.concatenate([eig_vec, np.zeros((N, k - N))], dim=-1)
-            eig_val = np.concatenate([eig_val, np.zeros(k - N)], dim=-1)
-        
-        ind = np.abs(eig_val).argsort(axis=0)[::-1][:k]
+            eig_vec = np.concatenate([eig_vec, np.zeros((N, k - N))], axis=-1)
+            eig_val = np.concatenate([eig_val, np.zeros(k - N)], axis=-1)
+
+        ind = np.abs(eig_val).argsort(axis=0)[:k]
 
         eig_vec = eig_vec[:, ind]
 

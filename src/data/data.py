@@ -33,11 +33,9 @@ def load_data(dataset, batch_size, sample_len, output_len, window_size, \
 
     data_dir = os.path.dirname(os.path.abspath(data_path))
     if few_shot < 1:
-        saved_filename = f"{dataset}_fewshot{few_shot}_datasets.pt"
-    elif sample_len != 12 or output_len != 12:
-        saved_filename = f"{dataset}_sl{sample_len}_pl{output_len}_datasets.pt" 
+        saved_filename = f"{dataset}_fewshot{few_shot}_sl{sample_len}_pl{output_len}_tr{train_ratio}_vr{val_ratio}_datasets.pt"
     else:
-        saved_filename = f"{dataset}_datasets.pt"
+        saved_filename = f"{dataset}_sl{sample_len}_pl{output_len}_tr{train_ratio}_vr{val_ratio}_datasets.pt"
     saved_path = os.path.join(data_dir, saved_filename)
     dataprovider = data_dict[dataset](data_path, adj_path, dataset, node_shuffle_seed)
 
@@ -50,38 +48,32 @@ def load_data(dataset, batch_size, sample_len, output_len, window_size, \
             history=train_data['history'].cuda(),
             history_week_avg=train_data['history_week_avg'].cuda(),
             history_day_avg=train_data['history_day_avg'].cuda(),
-            history_month_avg=train_data['history_month_avg'].cuda(),
             target=train_data['target'].cuda(),
             target_week_avg=train_data['target_week_avg'].cuda(),
             target_day_avg=train_data['target_day_avg'].cuda(),
-            target_month_avg=train_data['target_month_avg'].cuda(),
             timestamp=train_data['timestamp'].cuda(),
             training=True
         )
-        
+
         val_data = saved_data['val_dataset']
         val_set = BasicDataset(
             history=val_data['history'].cuda(),
             history_week_avg=val_data['history_week_avg'].cuda(),
             history_day_avg=val_data['history_day_avg'].cuda(),
-            history_month_avg=val_data['history_month_avg'].cuda(),
             target=val_data['target'].cuda(),
             target_week_avg=val_data['target_week_avg'].cuda(),
             target_day_avg=val_data['target_day_avg'].cuda(),
-            target_month_avg=val_data['target_month_avg'].cuda(),
             timestamp=val_data['timestamp'].cuda()
         )
-        
+
         test_data = saved_data['test_dataset']
         test_set = BasicDataset(
             history=test_data['history'].cuda(),
             history_week_avg=test_data['history_week_avg'].cuda(),
             history_day_avg=test_data['history_day_avg'].cuda(),
-            history_month_avg=test_data['history_month_avg'].cuda(),
             target=test_data['target'].cuda(),
             target_week_avg=test_data['target_week_avg'].cuda(),
             target_day_avg=test_data['target_day_avg'].cuda(),
-            target_month_avg=test_data['target_month_avg'].cuda(),
             timestamp=test_data['timestamp'].cuda()
         )
         
@@ -110,33 +102,27 @@ def load_data(dataset, batch_size, sample_len, output_len, window_size, \
                 'history': train_set.history.cpu(),
                 'history_week_avg': train_set.history_week_avg.cpu(),
                 'history_day_avg': train_set.history_day_avg.cpu(),
-                'history_month_avg': train_set.history_month_avg.cpu(),
                 'target': train_set.target.cpu(),
                 'target_week_avg': train_set.target_week_avg.cpu(),
                 'target_day_avg': train_set.target_day_avg.cpu(),
-                'target_month_avg': train_set.target_month_avg.cpu(),
                 'timestamp': train_set.timestamp.cpu(),
             },
             'val_dataset': {
                 'history': val_set.history.cpu(),
                 'history_week_avg': val_set.history_week_avg.cpu(),
                 'history_day_avg': val_set.history_day_avg.cpu(),
-                'history_month_avg': val_set.history_month_avg.cpu(),
                 'target': val_set.target.cpu(),
                 'target_week_avg': val_set.target_week_avg.cpu(),
                 'target_day_avg': val_set.target_day_avg.cpu(),
-                'target_month_avg': val_set.target_month_avg.cpu(),
                 'timestamp': val_set.timestamp.cpu(),
             },
             'test_dataset': {
                 'history': test_set.history.cpu(),
                 'history_week_avg': test_set.history_week_avg.cpu(),
                 'history_day_avg': test_set.history_day_avg.cpu(),
-                'history_month_avg': test_set.history_month_avg.cpu(),
                 'target': test_set.target.cpu(),
                 'target_week_avg': test_set.target_week_avg.cpu(),
                 'target_day_avg': test_set.target_day_avg.cpu(),
-                'target_month_avg': test_set.target_month_avg.cpu(),
                 'timestamp': test_set.timestamp.cpu(),
             },
             'scaler_mean': scaler_mean,

@@ -4,6 +4,8 @@ import torch.nn as nn
 import argparse
 import yaml
 import os
+import time
+import json
 from utils.utils import get_time_str,check_dir,draw_loss_line,draw_mape_node,get_randmask,get_block_mask, cal_shortest_path_length
 from logger import getlogger
 from model.model import AICLLM
@@ -40,8 +42,9 @@ def TrainEpoch(loader, model, optim, loss_fn, prompt_prefix, scaler, need_step: 
 
     loss_item = 0
     count = 0
+    epoch_start = time.time()
 
-    for input, input_week, input_day, input_month, target, target_week, target_day, target_month, timestamp in loader:  
+    for input, input_week, input_day, target, target_week, target_day, timestamp in loader:
         # (B,T,N,F)
         B, T, N, F = input.shape
         input = input.permute(0,2,1,3).contiguous().view(B,N,-1)
@@ -68,7 +71,7 @@ def TrainEpoch(loader, model, optim, loss_fn, prompt_prefix, scaler, need_step: 
 
             for l in other_loss:
                 L += l
-                
+
             L.backward()
 
             optim.step()
@@ -76,16 +79,17 @@ def TrainEpoch(loader, model, optim, loss_fn, prompt_prefix, scaler, need_step: 
     if count:
         loss_item /= count
 
-    return loss_item
+    return loss_item, time.time() - epoch_start
+
 
 def TestEpoch(loader, model, prompt_prefix, scaler, save=False):
-    
+    test_start = time.time()
     with torch.no_grad():
         model.eval()
         targets = []
         predicts = []
 
-        for input, input_week, input_day, input_month, target, target_week, target_day, target_month, timestamp in loader:
+        for input, input_week, input_day, target, target_week, target_day, timestamp in loader:
             B, T, N, F = input.shape
 
             input = input.permute(0,2,1,3).contiguous().view(B,N,-1)
@@ -107,18 +111,36 @@ def TestEpoch(loader, model, prompt_prefix, scaler, save=False):
         predicts = scaler.inverse_transform(predicts)
         targets = scaler.inverse_transform(targets)
 
-        mae_pred, rmse_pred, mape_pred = None, None, None
-
         mae_pred = MAE_torch(pred=predicts[:,-args.predict_len:],true=targets[:,-args.predict_len:])
         rmse_pred = RMSE_torch(pred=predicts[:,-args.predict_len:],true=targets[:,-args.predict_len:])
         mape_pred = MAPE_torch(pred=predicts[:,-args.predict_len:],true=targets[:,-args.predict_len:])
 
-
-
     if save:
         np.savez(os.path.join(LOG_DIR, 'test.npz'), targets=targets.cpu().numpy(), predicts=predicts.cpu().numpy())
 
-    return mae_pred, rmse_pred, mape_pred
+    return mae_pred, rmse_pred, mape_pred, time.time() - test_start
+
+
+def compute_macs(model, node_num, args, output_len):
+    """Estimate MACs for one forward pass with batch_size=1. Returns -1 if thop is unavailable."""
+    try:
+        from thop import profile
+        B, N = 1, node_num
+        x_dummy       = torch.zeros(B, N, args.sample_len * args.input_dim).cuda()
+        day_dummy     = torch.zeros(B, N, args.sample_len * args.input_dim).cuda()
+        week_dummy    = torch.zeros(B, N, args.sample_len * args.input_dim).cuda()
+        ya_week_dummy = torch.zeros(B, N, output_len * args.output_dim).cuda()
+        ya_day_dummy  = torch.zeros(B, N, output_len * args.output_dim).cuda()
+        ts_dummy      = torch.zeros(B, args.sample_len + output_len, 5).cuda()
+        macs, _ = profile(
+            model,
+            inputs=(x_dummy, day_dummy, week_dummy, ya_week_dummy, ya_day_dummy, ts_dummy, None),
+            verbose=False
+        )
+        return int(macs)
+    except Exception as e:
+        print(f"[MACs] Could not compute: {e}")
+        return -1
 
 
 def Train(args, mylogger, model, prompt_prefix, scaler):
@@ -148,18 +170,22 @@ def Train(args, mylogger, model, prompt_prefix, scaler):
     train_loss_line = {'x': [], 'y': []}
     val_loss_line = {'x': [], 'y': []}
 
+    train_times = []
+    test_times  = []
+
     for epoch in range(max_epoch):
 
-        train_loss = TrainEpoch(train_loader, model, optim, loss_fn, prompt_prefix, scaler, need_step=True)
+        train_loss, train_time = TrainEpoch(train_loader, model, optim, loss_fn, prompt_prefix, scaler, need_step=True)
+        train_times.append(train_time)
 
         train_loss_line['x'].append(epoch)
         train_loss_line['y'].append(train_loss)
 
-        mylogger.info(f"epoch {epoch} train_loss:{train_loss}")
+        mylogger.info(f"epoch {epoch} train_loss:{train_loss:.4f}  train_time:{train_time:.2f}s")
 
         if epoch % val_epoch == 0:
 
-            val_loss = TrainEpoch(val_loader, model, optim, loss_fn, prompt_prefix, scaler, need_step=False)
+            val_loss, _ = TrainEpoch(val_loader, model, optim, loss_fn, prompt_prefix, scaler, need_step=False)
             val_loss_line['x'].append(epoch)
             val_loss_line['y'].append(val_loss)
             wandb.log({"Train Loss": train_loss, "Validation Loss": val_loss}, step=epoch)
@@ -170,7 +196,7 @@ def Train(args, mylogger, model, prompt_prefix, scaler):
                 best_model = copy.deepcopy(model.grad_state_dict())
             else:
                 patience_count += 1
-            
+
             if args.nni:
                 nni.report_intermediate_result(val_loss)
             mylogger.info(f"[Validation] epoch {epoch} val_loss:{val_loss}")
@@ -178,33 +204,37 @@ def Train(args, mylogger, model, prompt_prefix, scaler):
 
         if epoch % test_epoch == 0:
 
-            mae_pred, rmse_pred, mape_pred = TestEpoch(test_loader, model, prompt_prefix, scaler=scaler)
-            
+            mae_pred, rmse_pred, mape_pred, test_time = TestEpoch(test_loader, model, prompt_prefix, scaler=scaler)
+            test_times.append(test_time)
+
             if args.task in ['all', 'prediction']:
-                mylogger.info(f"[Test][prediction] epoch {epoch} mae:{mae_pred} rmse:{rmse_pred} mape:{mape_pred}")
+                mylogger.info(f"[Test][prediction] epoch {epoch} mae:{mae_pred} rmse:{rmse_pred} mape:{mape_pred}  test_time:{test_time:.2f}s")
 
         mylogger.info(f"[Scheduler] epoch {epoch} lr:{optim.param_groups[0]['lr']}")
-        
+
         if patience_count >= args.patience:
             mylogger.info('early stop')
             break
-            
+
 
     if args.nni:
         nni.report_final_result(best_loss)
 
     model.load_state_dict(best_model, strict=False)
 
-    mae_pred, rmse_pred, mape_pred = TestEpoch(test_loader, model, prompt_prefix, scaler, save=args.save_result)
-    wandb.log({ "Best Test Prediction MAE": mae_pred, "Best Test Prediction RMSE": rmse_pred, "Best Test Prediction MAPE": mape_pred}, step=0)
+    mae_pred, rmse_pred, mape_pred, final_test_time = TestEpoch(test_loader, model, prompt_prefix, scaler, save=args.save_result)
+    test_times.append(final_test_time)
+    wandb.log({"Best Test Prediction MAE": mae_pred, "Best Test Prediction RMSE": rmse_pred, "Best Test Prediction MAPE": mape_pred}, step=0)
 
-    
     if args.task in ['all', 'prediction']:
-        mylogger.info(f"[Test][prediction] best model mae:{mae_pred} rmse:{rmse_pred} mape:{mape_pred}")  
+        mylogger.info(f"[Test][prediction] best model mae:{mae_pred} rmse:{rmse_pred} mape:{mape_pred}")
 
     draw_loss_line(train_loss_line, val_loss_line, os.path.join(LOG_DIR, 'loss.png'))
 
-    return mae_pred, rmse_pred, mape_pred
+    avg_train_time = sum(train_times) / len(train_times) if train_times else 0.0
+    avg_test_time  = sum(test_times)  / len(test_times)  if test_times  else 0.0
+
+    return mae_pred, rmse_pred, mape_pred, avg_train_time, avg_test_time
 
 
 def getllm(args):
@@ -216,11 +246,11 @@ def getllm(args):
         basemodel = Transformer(args.causal, args.lora, args.ln_grad, args.llm_layers)
     else:
         raise ValueError(f"Model '{args.model}' is not supported. Please use --model 'gpt2' or 'llama7b'.")
-        
+
     return basemodel
 
 if __name__ == '__main__':
-    
+
     args = InitArgs()
     wandb.init(project=f"AIC-LLM_{args.dataset}", name=f"{args.desc}_{datetime.now().strftime('%Y-%m-%d_%H-%M')}", config=vars(args))
 
@@ -250,13 +280,15 @@ if __name__ == '__main__':
                                            few_shot = args.few_shot, node_shuffle_seed = args.node_shuffle_seed)
     #distance_mx = cal_shortest_path_length(adj_mx, distance_mx)
 
+    steps_per_day = 144 if args.dataset[:6] == 'ENERGY' else 288
+
     # Get prompt template (not tokenized yet)
     prompt_template = None
     if args.dataset[:6] in PROMPTS:
         print(f"Loading prompt template for {args.dataset}...")
         prompt_template = PROMPTS[args.dataset[:6]]
         print("Prompt template loaded (will be embedded once)")
-    
+
     if args.prompt_prefix is not None:
         prompt_template = args.prompt_prefix
 
@@ -284,30 +316,61 @@ if __name__ == '__main__':
                     anchor_week_loss_weight=args.anchor_week_loss_weight, anchor_day_loss_weight=args.anchor_day_loss_weight, \
                     anchor_loss_type=args.anchor_loss_type, \
                     use_sandglassAttn = args.sandglassAttn, dropout = args.dropout, trunc_k = args.trunc_k, t_dim = args.t_dim,wo_conloss=args.wo_conloss, wo_conloss1=args.wo_conloss1, wo_conloss2=args.wo_conloss2,
-                    ablation_drop_token=args.ablation_drop_token).cuda()
+                    ablation_drop_token=args.ablation_drop_token,
+                    steps_per_day=steps_per_day).cuda()
 
-    
+
     if not args.from_pretrained_model is None:
         model.load(args.from_pretrained_model)
-    
+
     if args.zero_shot and args.from_pretrained_model is None :
         mylogger.info(f'Please specify pretrained model when test zero-shot')
         exit()
-    
-    #init_model(model,lambda x : x.requires_grad)
 
     mylogger.info(model)
     total_params, total_trainable_params = model.params_num()
     mylogger.info(f'total_params:{total_params}    total_trainable_params:{total_trainable_params}')
-
     mylogger.info(model.grad_state_dict().keys())
-    #mylogger.info(model.state_dict().keys())
 
-    mae, rmse, mape = Train(args, mylogger, model, None, scaler)  # Model manages prompt internally now
+    # Compute MACs (requires `pip install thop`)
+    macs = compute_macs(model, node_num, args, output_len)
+    mylogger.info(f'MACs: {macs:,}' if macs >= 0 else 'MACs: unavailable (install thop)')
+    wandb.log({"total_params": total_params, "total_trainable_params": total_trainable_params, "macs": macs})
 
-    # Log results and params to CSV
-    csv_path = log_result_to_csv(args, mae, rmse, mape, total_params, total_trainable_params)
+    mae, rmse, mape, avg_train_time, avg_test_time = Train(args, mylogger, model, None, scaler)
+
+    mylogger.info(f'avg_train_time_per_epoch:{avg_train_time:.2f}s    avg_test_time_per_epoch:{avg_test_time:.2f}s')
+    wandb.log({"avg_train_time_s": avg_train_time, "avg_test_time_s": avg_test_time})
+
+    # Log to CSV
+    csv_path = log_result_to_csv(args, mae, rmse, mape, total_params, total_trainable_params,
+                                 macs=macs, avg_train_time=avg_train_time, avg_test_time=avg_test_time)
     mylogger.info(f"Results saved to CSV: {csv_path}")
 
+    # Save JSON summary for easy programmatic access
+    summary = {
+        "run_id": os.path.basename(LOG_DIR),
+        "dataset": args.dataset,
+        "model": args.model,
+        "params": {
+            "total_params": total_params,
+            "total_trainable_params": total_trainable_params,
+            "macs": macs,
+        },
+        "timing": {
+            "avg_train_time_per_epoch_s": round(avg_train_time, 3),
+            "avg_test_time_per_epoch_s":  round(avg_test_time,  3),
+        },
+        "metrics": {
+            "mae":  float(mae)  if mae  is not None else None,
+            "rmse": float(rmse) if rmse is not None else None,
+            "mape": float(mape) if mape is not None else None,
+        },
+        "args": vars(args),
+    }
+    summary_path = os.path.join(LOG_DIR, 'results_summary.json')
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+    mylogger.info(f"JSON summary saved: {summary_path}")
+
     model.save(modelpath)
-    

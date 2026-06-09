@@ -24,24 +24,20 @@ class BasicDataset(torch.utils.data.Dataset):
     history: torch.Tensor              # (B, sample_len, node_num, features)
     history_week_avg: torch.Tensor     # (B, sample_len, node_num, features) - weekly average
     history_day_avg: torch.Tensor      # (B, sample_len, node_num, features) - daily average
-    history_month_avg: torch.Tensor    # (B, sample_len, node_num, features) - monthly average
     target: torch.Tensor               # (B, output_len, node_num, output_dim)
     target_week_avg: torch.Tensor      # (B, output_len, node_num, output_dim) - weekly average target
     target_day_avg: torch.Tensor       # (B, output_len, node_num, output_dim) - daily average target
-    target_month_avg: torch.Tensor     # (B, output_len, node_num, output_dim) - monthly average target
     timestamp: torch.Tensor            # (B, window_size, 5)
 
-    def __init__(self, history, history_week_avg, history_day_avg, history_month_avg,
-                 target, target_week_avg, target_day_avg, target_month_avg, 
+    def __init__(self, history, history_week_avg, history_day_avg,
+                 target, target_week_avg, target_day_avg,
                  timestamp, training=False) -> None:
         self.history = history
         self.history_week_avg = history_week_avg
         self.history_day_avg = history_day_avg
-        self.history_month_avg = history_month_avg
         self.target = target
         self.target_week_avg = target_week_avg
         self.target_day_avg = target_day_avg
-        self.target_month_avg = target_month_avg
         self.timestamp = timestamp
         self.training = training
 
@@ -49,10 +45,10 @@ class BasicDataset(torch.utils.data.Dataset):
         return self.history.shape[0]
     
     def __getitem__(self, index):
-        return (self.history[index], 
-                self.history_week_avg[index], self.history_day_avg[index], self.history_month_avg[index],
-                self.target[index], 
-                self.target_week_avg[index], self.target_day_avg[index], self.target_month_avg[index],
+        return (self.history[index],
+                self.history_week_avg[index], self.history_day_avg[index],
+                self.target[index],
+                self.target_week_avg[index], self.target_day_avg[index],
                 self.timestamp[index])
 
 
@@ -61,6 +57,7 @@ class DataProvider():
     features: int
     data: torch.Tensor       # (T, node_num, features) - dữ liệu gốc
     timestamp: torch.Tensor  # (T, 5) - [month, day, weekday, hour, minute]
+    steps_per_day: int = 288  # override in subclasses (e.g. 24 for 1h data)
 
     def __init__(self, data_path, adj_path, dataset, node_shuffle_seed=None) -> None:
         self.dataset = dataset
@@ -77,137 +74,81 @@ class DataProvider():
             self.data = self.data[:, idx, :]
             self.adj_mx = self.adj_mx[idx, :][:, idx]
 
+    def _time_to_slot(self, hour, minute):
+        """Convert (hour, minute) arrays to intra-day slot index [0, steps_per_day)."""
+        return (hour * 60 + minute) * self.steps_per_day // (24 * 60)
+
     def compute_weekly_average(self, train_data, train_timestamp):
-        T_full = self.data.shape[0]
-        
-        # Tính weekdaytime cho tập train
-        weekday = train_timestamp[:, 2]      # 0-6
-        hour = train_timestamp[:, 3]         # 0-23
-        minute = train_timestamp[:, 4]       # 0-59
-        train_weekdaytime = weekday * 288 + (hour * 60 + minute) // 5
+        spd = self.steps_per_day
+        spw = spd * 7
 
-        weekly_avg_dict = {}
-        
-        # Tính trung bình cho từng node, từng feature
-        for node_idx in range(self.node_num):
-            for feature_idx in range(self.features):
+        weekday = train_timestamp[:, 2].cpu().numpy()
+        hour    = train_timestamp[:, 3].cpu().numpy()
+        minute  = train_timestamp[:, 4].cpu().numpy()
+        train_slot = weekday * spd + self._time_to_slot(hour, minute)  # (T_train,)
 
-                flow_values = train_data[:, node_idx, feature_idx].cpu().numpy()
-                wdt_values = train_weekdaytime.cpu().numpy()
+        full_weekday = self.timestamp[:, 2].cpu().numpy()
+        full_hour    = self.timestamp[:, 3].cpu().numpy()
+        full_minute  = self.timestamp[:, 4].cpu().numpy()
+        full_slot = full_weekday * spd + self._time_to_slot(full_hour, full_minute)  # (T_full,)
 
-                df = pd.DataFrame({
-                    'weekdaytime': wdt_values,
-                    'flow': flow_values
-                })
-                
-                def get_mean_without_null(data):
-                    return data[data != 0].mean() if (data != 0).any() else 0
-                
-                avg_by_wdt = df.groupby('weekdaytime')['flow'].apply(get_mean_without_null)
-                
-                for wdt, avg_val in avg_by_wdt.items():
-                    weekly_avg_dict[(node_idx, feature_idx, wdt)] = avg_val
-        
-        weekly_avg_full = torch.zeros_like(self.data)
-        
-        full_weekday = self.timestamp[:, 2]
-        full_hour = self.timestamp[:, 3]
-        full_minute = self.timestamp[:, 4]
-        full_wdt = (full_weekday * 288 + (full_hour * 60 + full_minute) // 5).cpu().numpy()
-        
-        for t in range(T_full):
-            wdt = full_wdt[t]
-            for node_idx in range(self.node_num):
-                for feature_idx in range(self.features):
-                    key = (node_idx, feature_idx, wdt)
-                    weekly_avg_full[t, node_idx, feature_idx] = weekly_avg_dict.get(key, 0)
-        
-        return weekly_avg_full
+        train_np = train_data.cpu().numpy().astype(np.float64)
+        mask = (train_np != 0).astype(np.float64)
+
+        lookup_sum = np.zeros((spw, self.node_num, self.features), dtype=np.float64)
+        lookup_cnt = np.zeros((spw, self.node_num, self.features), dtype=np.float64)
+        np.add.at(lookup_sum, train_slot, train_np * mask)
+        np.add.at(lookup_cnt, train_slot, mask)
+
+        lookup = (lookup_sum / np.maximum(lookup_cnt, 1)).astype(np.float32)
+        return torch.from_numpy(lookup[full_slot])  # (T_full, N, F)
 
     def compute_daily_average(self, train_data, train_timestamp):
-        T_full = self.data.shape[0]
-        hour = train_timestamp[:, 3]         # 0-23
-        minute = train_timestamp[:, 4]       # 0-59
-        train_daytime = (hour * 60 + minute) // 5  # 288 slots
+        spd = self.steps_per_day
 
-        daily_avg_dict = {}
-        
-        for node_idx in range(self.node_num):
-            for feature_idx in range(self.features):
-                flow_values = train_data[:, node_idx, feature_idx].cpu().numpy()
-                dt_values = train_daytime.cpu().numpy()
+        hour   = train_timestamp[:, 3].cpu().numpy()
+        minute = train_timestamp[:, 4].cpu().numpy()
+        train_slot = self._time_to_slot(hour, minute)  # (T_train,)
 
-                df = pd.DataFrame({
-                    'daytime': dt_values,
-                    'flow': flow_values
-                })
-                
-                def get_mean_without_null(data):
-                    return data[data != 0].mean() if (data != 0).any() else 0
-                
-                avg_by_dt = df.groupby('daytime')['flow'].apply(get_mean_without_null)
-                
-                for dt, avg_val in avg_by_dt.items():
-                    daily_avg_dict[(node_idx, feature_idx, dt)] = avg_val
-        
-        daily_avg_full = torch.zeros_like(self.data)
-        
-        full_hour = self.timestamp[:, 3]
-        full_minute = self.timestamp[:, 4]
-        full_dt = ((full_hour * 60 + full_minute) // 5).cpu().numpy()
-        
-        for t in range(T_full):
-            dt = full_dt[t]
-            for node_idx in range(self.node_num):
-                for feature_idx in range(self.features):
-                    key = (node_idx, feature_idx, dt)
-                    daily_avg_full[t, node_idx, feature_idx] = daily_avg_dict.get(key, 0)
-        
-        return daily_avg_full
+        full_hour   = self.timestamp[:, 3].cpu().numpy()
+        full_minute = self.timestamp[:, 4].cpu().numpy()
+        full_slot = self._time_to_slot(full_hour, full_minute)  # (T_full,)
+
+        train_np = train_data.cpu().numpy().astype(np.float64)
+        mask = (train_np != 0).astype(np.float64)
+
+        lookup_sum = np.zeros((spd, self.node_num, self.features), dtype=np.float64)
+        lookup_cnt = np.zeros((spd, self.node_num, self.features), dtype=np.float64)
+        np.add.at(lookup_sum, train_slot, train_np * mask)
+        np.add.at(lookup_cnt, train_slot, mask)
+
+        lookup = (lookup_sum / np.maximum(lookup_cnt, 1)).astype(np.float32)
+        return torch.from_numpy(lookup[full_slot])  # (T_full, N, F)
 
     def compute_monthly_average(self, train_data, train_timestamp):
-        T_full = self.data.shape[0]
-        
-        day = train_timestamp[:, 1]          # 1-31
-        hour = train_timestamp[:, 3]         # 0-23
-        minute = train_timestamp[:, 4]       # 0-59
-        train_monthdaytime = day * 288 + (hour * 60 + minute) // 5
+        spd = self.steps_per_day
+        spm = 31 * spd  # day-of-month 1-31, 0-indexed as (day-1)
 
-        monthly_avg_dict = {}
-        
-        for node_idx in range(self.node_num):
-            for feature_idx in range(self.features):
-                flow_values = train_data[:, node_idx, feature_idx].cpu().numpy()
-                mdt_values = train_monthdaytime.cpu().numpy()
+        day    = train_timestamp[:, 1].cpu().numpy()  # 1-31
+        hour   = train_timestamp[:, 3].cpu().numpy()
+        minute = train_timestamp[:, 4].cpu().numpy()
+        train_slot = (day - 1) * spd + self._time_to_slot(hour, minute)  # (T_train,)
 
-                df = pd.DataFrame({
-                    'monthdaytime': mdt_values,
-                    'flow': flow_values
-                })
-                
-                def get_mean_without_null(data):
-                    return data[data != 0].mean() if (data != 0).any() else 0
-                
-                avg_by_mdt = df.groupby('monthdaytime')['flow'].apply(get_mean_without_null)
-                
-                for mdt, avg_val in avg_by_mdt.items():
-                    monthly_avg_dict[(node_idx, feature_idx, mdt)] = avg_val
-        
-        monthly_avg_full = torch.zeros_like(self.data)
-        
-        full_day = self.timestamp[:, 1]
-        full_hour = self.timestamp[:, 3]
-        full_minute = self.timestamp[:, 4]
-        full_mdt = (full_day * 288 + (full_hour * 60 + full_minute) // 5).cpu().numpy()
-        
-        for t in range(T_full):
-            mdt = full_mdt[t]
-            for node_idx in range(self.node_num):
-                for feature_idx in range(self.features):
-                    key = (node_idx, feature_idx, mdt)
-                    monthly_avg_full[t, node_idx, feature_idx] = monthly_avg_dict.get(key, 0)
-        
-        return monthly_avg_full
+        full_day    = self.timestamp[:, 1].cpu().numpy()
+        full_hour   = self.timestamp[:, 3].cpu().numpy()
+        full_minute = self.timestamp[:, 4].cpu().numpy()
+        full_slot = (full_day - 1) * spd + self._time_to_slot(full_hour, full_minute)  # (T_full,)
+
+        train_np = train_data.cpu().numpy().astype(np.float64)
+        mask = (train_np != 0).astype(np.float64)
+
+        lookup_sum = np.zeros((spm, self.node_num, self.features), dtype=np.float64)
+        lookup_cnt = np.zeros((spm, self.node_num, self.features), dtype=np.float64)
+        np.add.at(lookup_sum, train_slot, train_np * mask)
+        np.add.at(lookup_cnt, train_slot, mask)
+
+        lookup = (lookup_sum / np.maximum(lookup_cnt, 1)).astype(np.float32)
+        return torch.from_numpy(lookup[full_slot])  # (T_full, N, F)
 
     def getdataset(self, sample_len, output_len, window_size,
                    input_dim, output_dim,
@@ -230,10 +171,9 @@ class DataProvider():
         train_data = self.data[train_range[0]:train_range[1]]
         train_te = self.timestamp[train_range[0]:train_range[1]]
         
-        # Compute all 3 types of averages
+        # Compute averages from training data
         weekly_avg = self.compute_weekly_average(train_data, train_te).cuda()
         daily_avg = self.compute_daily_average(train_data, train_te).cuda()
-        monthly_avg = self.compute_monthly_average(train_data, train_te).cuda()
 
         scaler_data = self.data[train_range[0]:train_range[1]]
         dim = scaler_data.shape[-1]
@@ -245,38 +185,31 @@ class DataProvider():
         train_data_normal = self.data[train_range[0]:train_range[1]]
         train_week_avg = weekly_avg[train_range[0]:train_range[1]]
         train_day_avg = daily_avg[train_range[0]:train_range[1]]
-        train_month_avg = monthly_avg[train_range[0]:train_range[1]]
-        
+
         train_sample = generate_sample_by_sliding_window(train_data_normal, sample_len=window_size)
         train_sample_week = generate_sample_by_sliding_window(train_week_avg, sample_len=window_size)
         train_sample_day = generate_sample_by_sliding_window(train_day_avg, sample_len=window_size)
-        train_sample_month = generate_sample_by_sliding_window(train_month_avg, sample_len=window_size)
-        
+
         train_x = train_sample[:, :sample_len, ..., :input_dim]
         train_x_week = train_sample_week[:, :sample_len, ..., :input_dim]
         train_x_day = train_sample_day[:, :sample_len, ..., :input_dim]
-        train_x_month = train_sample_month[:, :sample_len, ..., :input_dim]
         train_y = train_sample[:, -output_len:, ..., :output_dim]
         train_y_week = train_sample_week[:, -output_len:, ..., :output_dim]
         train_y_day = train_sample_day[:, -output_len:, ..., :output_dim]
-        train_y_month = train_sample_month[:, -output_len:, ..., :output_dim]
-        
+
         train_x = self.scaler.transform(train_x)
         train_x_week = self.scaler.transform(train_x_week)
         train_x_day = self.scaler.transform(train_x_day)
-        train_x_month = self.scaler.transform(train_x_month)
-
         train_y = self.scaler.transform(train_y)
         train_y_week = self.scaler.transform(train_y_week)
         train_y_day = self.scaler.transform(train_y_day)
-        train_y_month = self.scaler.transform(train_y_month)
-        
+
         train_te = generate_sample_by_sliding_window(train_te, sample_len=window_size)
         train_dataset = BasicDataset(
-            history=train_x, 
-            history_week_avg=train_x_week, history_day_avg=train_x_day, history_month_avg=train_x_month,
-            target=train_y, 
-            target_week_avg=train_y_week, target_day_avg=train_y_day, target_month_avg=train_y_month,
+            history=train_x,
+            history_week_avg=train_x_week, history_day_avg=train_x_day,
+            target=train_y,
+            target_week_avg=train_y_week, target_day_avg=train_y_day,
             timestamp=train_te, training=True
         )
 
@@ -284,39 +217,32 @@ class DataProvider():
         val_data_normal = self.data[val_range[0]:val_range[1]]
         val_week_avg = weekly_avg[val_range[0]:val_range[1]]
         val_day_avg = daily_avg[val_range[0]:val_range[1]]
-        val_month_avg = monthly_avg[val_range[0]:val_range[1]]
         val_te = self.timestamp[val_range[0]:val_range[1]]
-        
+
         val_sample = generate_sample_by_sliding_window(val_data_normal, sample_len=window_size)
         val_sample_week = generate_sample_by_sliding_window(val_week_avg, sample_len=window_size)
         val_sample_day = generate_sample_by_sliding_window(val_day_avg, sample_len=window_size)
-        val_sample_month = generate_sample_by_sliding_window(val_month_avg, sample_len=window_size)
-        
+
         val_x = val_sample[:, :sample_len, ..., :input_dim]
         val_x_week = val_sample_week[:, :sample_len, ..., :input_dim]
         val_x_day = val_sample_day[:, :sample_len, ..., :input_dim]
-        val_x_month = val_sample_month[:, :sample_len, ..., :input_dim]
         val_y = val_sample[:, -output_len:, ..., :output_dim]
         val_y_week = val_sample_week[:, -output_len:, ..., :output_dim]
         val_y_day = val_sample_day[:, -output_len:, ..., :output_dim]
-        val_y_month = val_sample_month[:, -output_len:, ..., :output_dim]
-        
+
         val_x = self.scaler.transform(val_x)
         val_x_week = self.scaler.transform(val_x_week)
         val_x_day = self.scaler.transform(val_x_day)
-        val_x_month = self.scaler.transform(val_x_month)
-
         val_y = self.scaler.transform(val_y)
         val_y_week = self.scaler.transform(val_y_week)
         val_y_day = self.scaler.transform(val_y_day)
-        val_y_month = self.scaler.transform(val_y_month)
-        
+
         val_te = generate_sample_by_sliding_window(val_te, sample_len=window_size)
         val_dataset = BasicDataset(
-            history=val_x, 
-            history_week_avg=val_x_week, history_day_avg=val_x_day, history_month_avg=val_x_month,
-            target=val_y, 
-            target_week_avg=val_y_week, target_day_avg=val_y_day, target_month_avg=val_y_month,
+            history=val_x,
+            history_week_avg=val_x_week, history_day_avg=val_x_day,
+            target=val_y,
+            target_week_avg=val_y_week, target_day_avg=val_y_day,
             timestamp=val_te
         )
 
@@ -324,39 +250,32 @@ class DataProvider():
         test_data_normal = self.data[test_range[0]:test_range[1]]
         test_week_avg = weekly_avg[test_range[0]:test_range[1]]
         test_day_avg = daily_avg[test_range[0]:test_range[1]]
-        test_month_avg = monthly_avg[test_range[0]:test_range[1]]
         test_te = self.timestamp[test_range[0]:test_range[1]]
-        
+
         test_sample = generate_sample_by_sliding_window(test_data_normal, sample_len=window_size)
         test_sample_week = generate_sample_by_sliding_window(test_week_avg, sample_len=window_size)
         test_sample_day = generate_sample_by_sliding_window(test_day_avg, sample_len=window_size)
-        test_sample_month = generate_sample_by_sliding_window(test_month_avg, sample_len=window_size)
-        
+
         test_x = test_sample[:, :sample_len, ..., :input_dim]
         test_x_week = test_sample_week[:, :sample_len, ..., :input_dim]
         test_x_day = test_sample_day[:, :sample_len, ..., :input_dim]
-        test_x_month = test_sample_month[:, :sample_len, ..., :input_dim]
         test_y = test_sample[:, -output_len:, ..., :output_dim]
         test_y_week = test_sample_week[:, -output_len:, ..., :output_dim]
         test_y_day = test_sample_day[:, -output_len:, ..., :output_dim]
-        test_y_month = test_sample_month[:, -output_len:, ..., :output_dim]
-        
+
         test_x = self.scaler.transform(test_x)
         test_x_week = self.scaler.transform(test_x_week)
         test_x_day = self.scaler.transform(test_x_day)
-        test_x_month = self.scaler.transform(test_x_month)
-
         test_y = self.scaler.transform(test_y)
         test_y_week = self.scaler.transform(test_y_week)
         test_y_day = self.scaler.transform(test_y_day)
-        test_y_month = self.scaler.transform(test_y_month)
-        
+
         test_te = generate_sample_by_sliding_window(test_te, sample_len=window_size)
         test_dataset = BasicDataset(
-            history=test_x, 
-            history_week_avg=test_x_week, history_day_avg=test_x_day, history_month_avg=test_x_month,
-            target=test_y, 
-            target_week_avg=test_y_week, target_day_avg=test_y_day, target_month_avg=test_y_month,
+            history=test_x,
+            history_week_avg=test_x_week, history_day_avg=test_x_day,
+            target=test_y,
+            target_week_avg=test_y_week, target_day_avg=test_y_day,
             timestamp=test_te
         )
 
@@ -391,7 +310,7 @@ timestampfun = {
     'PEMS03': lambda T: generatetimestamp(start='20180901 00:00:00', periods=T, freq='5min'),
     'NYCTAXI': lambda T: generatetimestamp(start='20160401 00:00:00', periods=T, freq='30min'),
     'CHIBIKE': lambda T: generatetimestamp(start='20160401 00:00:00', periods=T, freq='30min'),
-    'ENERGY': lambda T: generatetimestamp(start='20190101 00:00:00', periods=T, freq='1h'),
+    'ENERGY': lambda T: generatetimestamp(start='20190101 00:00:00', periods=T, freq='10min'),
 }
 
 
@@ -431,6 +350,7 @@ class NYCTAXIProvider(DataProvider):
 
 
 class ENERGYProvider(DataProvider):
+    steps_per_day = 144  # 10-minute intervals (24*60/10)
 
     def read_data(self, data_path, adj_path=None) -> None:
         # Load hourly energy wind data matrix
